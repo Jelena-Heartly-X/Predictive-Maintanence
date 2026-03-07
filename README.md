@@ -124,34 +124,6 @@ python run_all.py
 
 ---
 
-## 📊 Results
-
-| Model | RMSE ↓ | MAE ↓ | Training Time | Complexity |
-|---|---|---|---|---|
-| SARIMA | ~44.2 | ~36.8 | Per-engine | Low |
-| **XGBoost** | **~19.8** | **~14.3** | **~12s** | Medium |
-| LSTM | ~23.5 | ~17.1 | ~180s | High |
-
-> ✅ **XGBoost achieved the best accuracy with the fastest training time.**
-
----
-
-## 🔑 Key Findings
-
-**1. XGBoost outperforms LSTM**
-Rolling and lag features explicitly encode temporal degradation patterns, giving tree-based models sufficient signal. The CMAPSS dataset (~20K rows) is also too small for deep learning to demonstrate a clear advantage.
-
-**2. SARIMA has fundamental limitations here**
-It is univariate (misses all cross-sensor interactions), assumes linear trends that don't match accelerating degradation near failure, and must be re-fit per engine — making it unscalable.
-
-**3. Complexity ≠ Performance**
-XGBoost beat the LSTM by ~15% RMSE while training 15× faster. This reinforces the importance of evaluating production constraints (latency, compute cost) alongside accuracy.
-
-**4. Feature Engineering was the biggest driver**
-Rolling mean features were consistently the top-ranked features in XGBoost's importance chart — more impactful than model architecture choices.
-
----
-
 ## ⚠️ Early Warning System
 
 The XGBoost model powers a threshold-based alert system. Engines with a predicted RUL ≤ 30 cycles trigger a **maintenance alert**, enabling proactive scheduling before failure occurs.
