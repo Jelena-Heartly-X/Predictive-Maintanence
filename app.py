@@ -102,8 +102,20 @@ COLS = (
     ["engine_id", "cycle", "op1", "op2", "op3"]
     + [f"s{i}" for i in range(1, 22)]
 )
-DROP_SENSORS   = ["s1", "s5", "s6", "s10", "s16", "s18", "s19"]
-USEFUL_SENSORS = [f"s{i}" for i in range(1, 22) if f"s{i}" not in DROP_SENSORS]
+SENSOR_COLS = [f"s{i}" for i in range(1, 22)]
+
+def compute_drop_sensors(subset="FD001"):
+    """Dynamically compute low-variance sensors per subset."""
+    try:
+        path = os.path.join(DATA_DIR, f"train_{subset}.txt")
+        df = pd.read_csv(path, sep=r"\s+", header=None, names=COLS)
+        std_vals = df[[f"s{i}" for i in range(1, 22)]].std()
+        return list(std_vals[std_vals < 0.01].index)
+    except Exception:
+        return ["s1", "s5", "s6", "s10", "s16", "s18", "s19"]  # fallback
+
+DROP_SENSORS   = compute_drop_sensors("FD001")  # default, updated per subset in app
+USEFUL_SENSORS = [s for s in SENSOR_COLS if s not in DROP_SENSORS]
 RUL_CLIP       = 125
 DATA_DIR       = os.path.join(os.path.dirname(__file__), "data", "CMaps")
 
@@ -204,6 +216,10 @@ with st.sidebar:
 
 # ── Load Data ─────────────────────────────────────────────────
 train, test = load_data(subset)
+
+# ── Recompute drop list for selected subset ───────────────────
+DROP_SENSORS   = compute_drop_sensors(subset)
+USEFUL_SENSORS = [s for s in SENSOR_COLS if s not in DROP_SENSORS]
 
 
 # ════════════════════════════════════════════════════════════
@@ -426,10 +442,6 @@ re-fit per engine — included to show its limitations.
                 avg_rmse = df_res["RMSE"].mean()
                 avg_mae  = df_res["MAE"].mean()
 
-                c1, c2 = st.columns(2)
-                c1.metric("Mean RMSE", f"{avg_rmse:.3f}")
-                c2.metric("Mean MAE",  f"{avg_mae:.3f}")
-
                 # Plot last engine forecast
                 eng = results[-1]["Engine"]
                 series = train[train["engine_id"] == eng][sensor_sarima].values
@@ -440,33 +452,57 @@ re-fit per engine — included to show its limitations.
                 fcast = fit.get_forecast(steps=len(series[split:]))
                 pred  = fcast.predicted_mean
                 ci    = fcast.conf_int()
-                # conf_int() returns a DataFrame in some statsmodels versions
-                # and a numpy array in others — handle both
                 if hasattr(ci, "iloc"):
                     ci_lower, ci_upper = ci.iloc[:, 0], ci.iloc[:, 1]
                 else:
                     ci_lower, ci_upper = ci[:, 0], ci[:, 1]
-                cycles = np.arange(len(series))
 
-                fig, ax = plt.subplots(figsize=(12, 3.5))
-                ax.plot(cycles[:split],     series[:split],  color=ACCENT,  label="Train")
-                ax.plot(cycles[split:],     series[split:],  color=ACCENT3, label="Actual")
-                ax.plot(cycles[split:],     pred,            color=ACCENT2, linestyle="--", label="Forecast")
-                ax.fill_between(cycles[split:], ci_lower, ci_upper,
-                                alpha=0.15, color=ACCENT2, label="95% CI")
-                ax.axvline(split, color="#8890aa", linestyle=":", linewidth=1)
-                ax.set_title(f"SARIMA Forecast — Engine {eng}, {sensor_sarima}", color="#c5cae9")
-                ax.set_xlabel("Cycle"); ax.set_ylabel("Sensor Value")
-                ax.legend(facecolor="#161825", edgecolor="#252840", fontsize=8)
-                plt.tight_layout()
-                st.pyplot(fig); plt.close()
+                # save everything to session state — display block below handles rendering
+                st.session_state["sarima_rmse"]    = avg_rmse
+                st.session_state["sarima_mae"]     = avg_mae
+                st.session_state["sarima_df_res"]  = df_res
+                st.session_state["sarima_fig_eng"] = eng
+                st.session_state["sarima_fig_sensor"] = sensor_sarima
+                # save forecast data for redisplay
+                st.session_state["sarima_series"] = series
+                st.session_state["sarima_split"]  = split
+                st.session_state["sarima_pred"]   = pred
+                st.session_state["sarima_ci_lower"] = ci_lower
+                st.session_state["sarima_ci_upper"] = ci_upper
 
-                with st.expander("Per-engine results"):
-                    st.dataframe(df_res, use_container_width=True)
+        # ── Display SARIMA results if available ──
+        _sarima_keys = ["sarima_rmse","sarima_mae","sarima_series","sarima_split","sarima_pred","sarima_ci_lower","sarima_ci_upper","sarima_fig_eng","sarima_fig_sensor"]
+        if all(k in st.session_state for k in _sarima_keys):
+            c1, c2 = st.columns(2)
+            c1.metric("Mean RMSE", f"{st.session_state['sarima_rmse']:.3f}")
+            c2.metric("Mean MAE",  f"{st.session_state['sarima_mae']:.3f}")
 
-                st.session_state["sarima_rmse"] = avg_rmse
-                st.session_state["sarima_mae"]  = avg_mae
-                st.warning("**Limitation:** SARIMA only sees one sensor at a time and must be re-fit for every engine — it won't scale.")
+            series    = st.session_state["sarima_series"]
+            split     = st.session_state["sarima_split"]
+            pred      = st.session_state["sarima_pred"]
+            ci_lower  = st.session_state["sarima_ci_lower"]
+            ci_upper  = st.session_state["sarima_ci_upper"]
+            eng       = st.session_state["sarima_fig_eng"]
+            sensor_sarima = st.session_state["sarima_fig_sensor"]
+            cycles    = np.arange(len(series))
+
+            fig, ax = plt.subplots(figsize=(12, 3.5))
+            ax.plot(cycles[:split],  series[:split], color=ACCENT,  label="Train")
+            ax.plot(cycles[split:],  series[split:], color=ACCENT3, label="Actual")
+            ax.plot(cycles[split:],  pred,           color=ACCENT2, linestyle="--", label="Forecast")
+            ax.fill_between(cycles[split:], ci_lower, ci_upper,
+                            alpha=0.15, color=ACCENT2, label="95% CI")
+            ax.axvline(split, color="#8890aa", linestyle=":", linewidth=1)
+            ax.set_title(f"SARIMA Forecast — Engine {eng}, {sensor_sarima}", color="#c5cae9")
+            ax.set_xlabel("Cycle"); ax.set_ylabel("Sensor Value")
+            ax.legend(facecolor="#161825", edgecolor="#252840", fontsize=8)
+            plt.tight_layout()
+            st.pyplot(fig); plt.close()
+
+            with st.expander("Per-engine results"):
+                st.dataframe(st.session_state["sarima_df_res"], use_container_width=True)
+
+            st.warning("**Limitation:** SARIMA only sees one sensor at a time and must be re-fit for every engine — it won't scale.")
 
     # ── XGBoost ──
     with model_tab2:
@@ -520,21 +556,48 @@ re-fit per engine — included to show its limitations.
                 rmse    = np.sqrt(mean_squared_error(y_te, pred))
                 mae     = mean_absolute_error(y_te, pred)
 
+            imp = pd.Series(model.feature_importances_, index=feat_cols).sort_values(ascending=False).head(15)
+            alerts = pd.DataFrame({"Predicted RUL": pred, "Actual RUL": y_te.values})
+            alerts["⚠️ Alert"] = alerts["Predicted RUL"] <= 30
+            true_alerts  = ((alerts["⚠️ Alert"]) & (alerts["Actual RUL"] <= 30)).sum()
+            false_alerts = ((alerts["⚠️ Alert"]) & (alerts["Actual RUL"] >  30)).sum()
+            missed       = ((~alerts["⚠️ Alert"]) & (alerts["Actual RUL"] <= 30)).sum()
+
+            st.session_state["xgb_rmse"]      = rmse
+            st.session_state["xgb_mae"]       = mae
+            st.session_state["xgb_time"]      = elapsed
+            st.session_state["xgb_model"]     = model
+            st.session_state["feat_cols"]     = feat_cols
+            st.session_state["xgb_pred"]      = pred
+            st.session_state["xgb_y_te"]      = y_te.values
+            st.session_state["xgb_imp"]       = imp
+            st.session_state["xgb_true_alerts"]  = int(true_alerts)
+            st.session_state["xgb_false_alerts"] = int(false_alerts)
+            st.session_state["xgb_missed"]       = int(missed)
+
+        # ── Display XGBoost results if available ──
+        _xgb_keys = ["xgb_rmse","xgb_mae","xgb_time","xgb_pred","xgb_y_te","xgb_imp","xgb_true_alerts","xgb_false_alerts","xgb_missed"]
+        if all(k in st.session_state for k in _xgb_keys):
+            rmse  = st.session_state["xgb_rmse"]
+            mae   = st.session_state["xgb_mae"]
+            elapsed = st.session_state["xgb_time"]
+            pred  = st.session_state["xgb_pred"]
+            y_te_vals = st.session_state["xgb_y_te"]
+            imp   = st.session_state["xgb_imp"]
+
             c1, c2, c3 = st.columns(3)
             c1.metric("RMSE",          f"{rmse:.3f}")
             c2.metric("MAE",           f"{mae:.3f}")
             c3.metric("Training Time", f"{elapsed:.1f}s")
 
-            # Plots
             fig, axes = plt.subplots(1, 2, figsize=(13, 4))
-            lim = max(float(y_te.max()), float(pred.max())) + 5
-            axes[0].scatter(y_te, pred, alpha=0.5, color=ACCENT, s=18)
+            lim = max(float(y_te_vals.max()), float(pred.max())) + 5
+            axes[0].scatter(y_te_vals, pred, alpha=0.5, color=ACCENT, s=18)
             axes[0].plot([0, lim], [0, lim], color=ACCENT2, linestyle="--", label="Perfect")
             axes[0].set_xlabel("Actual RUL"); axes[0].set_ylabel("Predicted RUL")
             axes[0].set_title(f"Predicted vs Actual  (RMSE={rmse:.2f})", color="#c5cae9")
             axes[0].legend(facecolor="#161825", edgecolor="#252840")
 
-            imp = pd.Series(model.feature_importances_, index=feat_cols).sort_values(ascending=False).head(15)
             axes[1].barh(imp.index[::-1], imp.values[::-1], color=ACCENT, edgecolor="#0d0f1a")
             axes[1].set_title("Top 15 Feature Importances", color="#c5cae9")
             axes[1].set_xlabel("Importance Score")
@@ -542,24 +605,11 @@ re-fit per engine — included to show its limitations.
             plt.tight_layout()
             st.pyplot(fig); plt.close()
 
-            # Early warning
-            alerts = pd.DataFrame({"Predicted RUL": pred, "Actual RUL": y_te.values})
-            alerts["⚠️ Alert"] = alerts["Predicted RUL"] <= 30
-            true_alerts  = ((alerts["⚠️ Alert"]) & (alerts["Actual RUL"] <= 30)).sum()
-            false_alerts = ((alerts["⚠️ Alert"]) & (alerts["Actual RUL"] >  30)).sum()
-            missed       = ((~alerts["⚠️ Alert"]) & (alerts["Actual RUL"] <= 30)).sum()
-
             st.markdown("### Early Warning System (threshold ≤ 30 cycles)")
             a1, a2, a3 = st.columns(3)
-            a1.metric("✅ True Alerts",      true_alerts,  help="Correctly flagged engines")
-            a2.metric("🔔 False Alarms",     false_alerts, help="Flagged but not critical")
-            a3.metric("⚠️ Missed Failures",  missed,       help="Critical engines NOT flagged")
-
-            st.session_state["xgb_rmse"]  = rmse
-            st.session_state["xgb_mae"]   = mae
-            st.session_state["xgb_time"]  = elapsed
-            st.session_state["xgb_model"] = model
-            st.session_state["feat_cols"] = feat_cols
+            a1.metric("✅ True Alerts",     st.session_state["xgb_true_alerts"],  help="Correctly flagged engines")
+            a2.metric("🔔 False Alarms",    st.session_state["xgb_false_alerts"], help="Flagged but not critical")
+            a3.metric("⚠️ Missed Failures", st.session_state["xgb_missed"],       help="Critical engines NOT flagged")
 
     # ── LSTM ──
     with model_tab3:
@@ -654,14 +704,33 @@ Uses `EarlyStopping` so training stops automatically when validation loss platea
             rmse = np.sqrt(mean_squared_error(y_te, pred))
             mae  = mean_absolute_error(y_te, pred)
 
+            st.session_state["lstm_rmse"]    = rmse
+            st.session_state["lstm_mae"]     = mae
+            st.session_state["lstm_time"]    = elapsed
+            st.session_state["lstm_pred"]    = pred
+            st.session_state["lstm_y_te"]    = y_te
+            st.session_state["lstm_history_loss"]     = history.history["loss"]
+            st.session_state["lstm_history_val_loss"] = history.history["val_loss"]
+
+        # ── Display LSTM results if available ──
+        _lstm_keys = ["lstm_rmse","lstm_mae","lstm_time","lstm_pred","lstm_y_te","lstm_history_loss","lstm_history_val_loss"]
+        if all(k in st.session_state for k in _lstm_keys):
+            rmse    = st.session_state["lstm_rmse"]
+            mae     = st.session_state["lstm_mae"]
+            elapsed = st.session_state["lstm_time"]
+            pred    = st.session_state["lstm_pred"]
+            y_te    = st.session_state["lstm_y_te"]
+            h_loss  = st.session_state["lstm_history_loss"]
+            h_val   = st.session_state["lstm_history_val_loss"]
+
             c1, c2, c3 = st.columns(3)
             c1.metric("RMSE",          f"{rmse:.3f}")
             c2.metric("MAE",           f"{mae:.3f}")
             c3.metric("Training Time", f"{elapsed:.0f}s")
 
             fig, axes = plt.subplots(1, 2, figsize=(13, 4))
-            axes[0].plot(history.history["loss"],     color=ACCENT,  label="Train")
-            axes[0].plot(history.history["val_loss"], color=ACCENT2, label="Val")
+            axes[0].plot(h_loss,  color=ACCENT,  label="Train")
+            axes[0].plot(h_val,   color=ACCENT2, label="Val")
             axes[0].set_title("Training Loss (MSE)", color="#c5cae9")
             axes[0].set_xlabel("Epoch"); axes[0].set_ylabel("Loss")
             axes[0].legend(facecolor="#161825", edgecolor="#252840")
@@ -675,10 +744,6 @@ Uses `EarlyStopping` so training stops automatically when validation loss platea
 
             plt.tight_layout()
             st.pyplot(fig); plt.close()
-
-            st.session_state["lstm_rmse"] = rmse
-            st.session_state["lstm_mae"]  = mae
-            st.session_state["lstm_time"] = elapsed
 
 
 # ════════════════════════════════════════════════════════════
@@ -729,40 +794,43 @@ as a test — just save a few rows as CSV.
                 engine_sel = st.selectbox("Select engine to predict", engines_up)
                 eng_df     = df_up[df_up["engine_id"] == engine_sel]
 
-                # Build features using rolling stats
                 available = [s for s in USEFUL_SENSORS if s in eng_df.columns]
                 if len(available) < 5:
                     st.error("Not enough sensor columns found in your file.")
                 else:
-                    # Simple heuristic prediction using last 10 cycles mean trend
-                    last_vals = eng_df[available].tail(10).mean()
+                    n_cycles = int(eng_df["cycle"].max())
 
-                    # Load a quick XGBoost from session or fit a mini one
+                    # ── Prediction ──────────────────────────────────────
                     if "xgb_model" in st.session_state:
-                        model = st.session_state["xgb_model"]
+                        model     = st.session_state["xgb_model"]
                         feat_cols = st.session_state["feat_cols"]
 
-                        # Build features for uploaded engine
                         tmp = df_up.copy()
                         if "RUL" not in tmp.columns:
                             tmp["RUL"] = 0
-                        fe = build_features_df(tmp)
-                        fc = get_feature_cols(fe)
-                        common = [c for c in feat_cols if c in fc]
+
+                        fe      = build_features_df(tmp)
+                        fc      = get_feature_cols(fe)
+
+                        # Scale uploaded data using training distribution
+                        from sklearn.preprocessing import MinMaxScaler
+                        train_fe_ref = build_features_df(train.assign(RUL=train["RUL"]))
+                        ref_fc  = get_feature_cols(train_fe_ref)
+                        common  = [c for c in feat_cols if c in fc and c in ref_fc]
 
                         if len(common) > 10:
-                            last_row = fe[fe["engine_id"] == engine_sel].tail(1)
-                            X_pred   = last_row[common].values
-                            rul_pred = float(model.predict(X_pred)[0])
+                            sc_ref = MinMaxScaler()
+                            sc_ref.fit(train_fe_ref[common])
+                            last_row         = fe[fe["engine_id"] == engine_sel].tail(1).copy()
+                            last_row[common] = sc_ref.transform(last_row[common])
+                            rul_pred         = float(model.predict(last_row[common].values)[0])
                         else:
-                            # Fallback: naive estimate from cycle count
-                            max_c    = eng_df["cycle"].max()
-                            rul_pred = max(0, RUL_CLIP - max_c)
+                            rul_pred = max(5, float(RUL_CLIP - n_cycles * 0.65))
                     else:
-                        max_c    = eng_df["cycle"].max()
-                        rul_pred = max(0, float(RUL_CLIP - max_c * 0.9))
+                        rul_pred = max(5, float(RUL_CLIP - n_cycles * 0.65))
+                        st.info("💡 Train the XGBoost model on the **Train Models** page for a more accurate prediction. Showing an estimate for now.")
 
-                    rul_pred   = max(0, min(rul_pred, RUL_CLIP))
+                    rul_pred   = float(np.clip(rul_pred, 1, RUL_CLIP))
                     health_pct = int(rul_pred / RUL_CLIP * 100)
 
                     st.markdown("---")
@@ -771,7 +839,7 @@ as a test — just save a few rows as CSV.
                     r1, r2, r3 = st.columns(3)
                     r1.metric("Predicted RUL",  f"{rul_pred:.0f} cycles")
                     r2.metric("Health Score",    f"{health_pct}%")
-                    r3.metric("Observed Cycles", int(eng_df["cycle"].max()))
+                    r3.metric("Observed Cycles", n_cycles)
 
                     if rul_pred <= 30:
                         st.error(f"⚠️  **CRITICAL** — Engine {engine_sel} predicted to fail within **{rul_pred:.0f} cycles**. Schedule maintenance immediately.")
@@ -780,22 +848,29 @@ as a test — just save a few rows as CSV.
                     else:
                         st.success(f"✅  **HEALTHY** — Engine {engine_sel} has ~{rul_pred:.0f} cycles remaining.")
 
-                    # Sensor trend chart
-                    st.markdown("### Last 50 Cycles — Sensor Trends")
+                    # ── Sensor Trend Chart (smoothed) ────────────────────
+                    st.markdown("### Sensor Degradation Trend")
+                    st.caption("Raw values are noisy due to varying operating conditions. A 5-cycle rolling mean reveals the true degradation trend.")
+
                     sensors_viz = [s for s in ["s11", "s12", "s4", "s7"] if s in eng_df.columns]
                     if sensors_viz:
-                        fig, ax = plt.subplots(figsize=(12, 3.5))
-                        tail_df = eng_df.tail(50)
+                        fig, ax = plt.subplots(figsize=(12, 3.8))
+                        tail_df = eng_df.copy().reset_index(drop=True)
                         colors_line = [ACCENT, ACCENT2, ACCENT3, ACCENT4]
                         for i, s in enumerate(sensors_viz):
-                            vals = (tail_df[s] - tail_df[s].min()) / (tail_df[s].max() - tail_df[s].min() + 1e-8)
-                            ax.plot(tail_df["cycle"], vals,
-                                    label=s, color=colors_line[i % 4], linewidth=1.5)
-                        ax.set_title("Normalised Sensor Values (last 50 cycles)", color="#c5cae9")
+                            smooth = tail_df[s].rolling(window=5, min_periods=1).mean()
+                            s_min, s_max = smooth.min(), smooth.max()
+                            norm = (smooth - s_min) / (s_max - s_min + 1e-8)
+                            ax.plot(tail_df["cycle"], norm,
+                                    label=s, color=colors_line[i % 4], linewidth=2, alpha=0.9)
+                        ax.set_title("Smoothed Sensor Trends (5-cycle rolling mean, normalised)", color="#c5cae9")
                         ax.set_xlabel("Cycle"); ax.set_ylabel("Normalised Value")
-                        ax.legend(facecolor="#161825", edgecolor="#252840", ncol=4, fontsize=8)
+                        ax.legend(facecolor="#161825", edgecolor="#252840", ncol=4, fontsize=9)
                         plt.tight_layout()
                         st.pyplot(fig); plt.close()
+
+                    if n_cycles < 50:
+                        st.warning(f"**Note:** Engine {engine_sel} has only {n_cycles} observed cycles. Predictions are less reliable for short histories — the model works best with 50+ cycles of data.")
 
 
 # ════════════════════════════════════════════════════════════
